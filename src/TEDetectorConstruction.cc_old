@@ -1,0 +1,672 @@
+/// \file TEDetectorConstruction.cc
+/// \brief Implementation of the TEDetectorConstruction class
+
+#include "TEDetectorConstruction.hh"
+// #include "TEDetectorMessenger.hh"
+#include "TETrackerSD.hh"
+
+#include "TEMagTabulatedField3D.hh"
+#include "G4FieldManager.hh"
+#include "G4TransportationManager.hh"
+#include "G4ChordFinder.hh"
+#include "G4EqMagElectricField.hh"
+// #include "G4SimpleRunge.hh"
+// #include "G4SimpleHeum.hh"
+#include "G4ClassicalRK4.hh"
+#include "G4PropagatorInField.hh"
+
+#include "G4EquationOfMotion.hh"
+#include "G4MagIntegratorStepper.hh"
+#include "G4MagIntegratorDriver.hh"
+
+#include "G4Material.hh"
+#include "G4NistManager.hh"
+#include "G4SDManager.hh"
+
+#include "G4UserLimits.hh"
+
+#include "G4Box.hh"
+#include "G4Tubs.hh"
+#include "G4Sphere.hh"
+#include "G4GenericPolycone.hh"
+#include "G4LogicalVolume.hh"
+#include "G4PVPlacement.hh"
+#include "G4RotationMatrix.hh"
+#include "G4GlobalMagFieldMessenger.hh"
+#include "G4AutoDelete.hh"
+
+#include "G4GeometryTolerance.hh"
+#include "G4GeometryManager.hh"
+
+#include "G4VisAttributes.hh"
+#include "G4Colour.hh"
+
+#include "G4SystemOfUnits.hh"
+
+#define MAGSTANDARD
+
+//....oooOO0OOooo........oooOO0OOooo........oooOO0OOooo........oooOO0OOooo......
+
+G4ThreadLocal
+G4GlobalMagFieldMessenger* TEDetectorConstruction::fMagFieldMessenger = 0;
+
+TEDetectorConstruction::TEDetectorConstruction() :G4VUserDetectorConstruction(),
+ fLogicTarget(NULL),
+ fTargetMaterial(NULL),
+ fVesselMaterial(NULL),
+ fStepLimit(NULL),
+ fLVE27_E31_Elecs(NULL),
+ fLVE32_E34_Elecs(NULL),
+ fLVE45_E49_Elecs(NULL),
+ fLVE51_E67_Elecs(NULL),
+ fLVE68_E87_Elecs(NULL),
+ fCheckOverlaps(true)
+{
+  fBField.Put(0);
+  fLVE27_E31_Elecs = new G4LogicalVolume*[nE27_E31_Elecs];
+  fLVE32_E34_Elecs = new G4LogicalVolume*[nE32_E34_Elecs];
+  fLVE45_E49_Elecs = new G4LogicalVolume*[nE45_E49_Elecs];
+  fLVE51_E67_Elecs = new G4LogicalVolume*[nE51_E67_Elecs];
+  fLVE68_E87_Elecs = new G4LogicalVolume*[nE68_E87_Elecs];
+}
+
+//....oooOO0OOooo........oooOO0OOooo........oooOO0OOooo........oooOO0OOooo......
+
+TEDetectorConstruction::~TEDetectorConstruction()
+{
+  delete [] fLVE27_E31_Elecs;
+  delete [] fLVE32_E34_Elecs;
+  delete [] fLVE45_E49_Elecs;
+  delete [] fLVE51_E67_Elecs;
+  delete [] fLVE68_E87_Elecs;
+//   delete fStepLimit;
+//   delete fMessenger;
+}
+
+//....oooOO0OOooo........oooOO0OOooo........oooOO0OOooo........oooOO0OOooo......
+
+G4VPhysicalVolume* TEDetectorConstruction::Construct()
+{
+  // Define materials
+  DefineMaterials();
+
+  // Define volumes
+  return DefineVolumes();
+}
+
+//....oooOO0OOooo........oooOO0OOooo........oooOO0OOooo........oooOO0OOooo......
+
+void TEDetectorConstruction::DefineMaterials()
+{
+  // Material definition
+
+  G4NistManager* nistManager = G4NistManager::Instance();
+
+  // Vacuum defined using NIST Manager
+  nistManager->FindOrBuildMaterial("G4_Galactic");
+
+  // Gaseous Helium, initialized from NIST Helium, but modified to change its pressure
+  G4Material *NIST_He = nistManager->FindOrBuildMaterial("G4_He");
+//   G4double atm = 1e-30*atmosphere;
+  G4double atm = 1.25e-6;
+  G4Material *gHe = new G4Material("gHe",                   // Name
+//                                    4./25400.*atm,   // Density
+                                   NIST_He->GetDensity()*atm,   // Density
+//                                    NIST_He->GetDensity(),   // Density
+                                   NIST_He,                 // Base material
+                                   kStateUndefined,         // State
+                                   CLHEP::STP_Temperature,  // Temperature
+                                   atm*atmosphere);                    // Pressure
+
+  // Stainless steel defined using NIST Manager
+  fVesselMaterial = nistManager->FindOrBuildMaterial("G4_STAINLESS-STEEL");
+
+  // Copper defined using NIST Manager
+  fTargetMaterial = nistManager->FindOrBuildMaterial("G4_Cu");
+
+
+  // Print materials
+  G4cout << *(G4Material::GetMaterialTable()) << G4endl;
+}
+
+//....oooOO0OOooo........oooOO0OOooo........oooOO0OOooo........oooOO0OOooo......
+
+G4VPhysicalVolume* TEDetectorConstruction::DefineVolumes()
+{
+  G4Material* vacuum  = G4Material::GetMaterial("G4_Galactic");
+  G4Material* helium  = G4Material::GetMaterial("G4_He");
+  G4Material* gHe     = G4Material::GetMaterial("gHe");
+  G4cout << "Vacuum pressure: " << vacuum->GetPressure()/atmosphere << " atm" << G4endl;
+  G4cout << "Vacuum density: "  << vacuum->GetDensity()/(g/cm3) << " g/cm3" << G4endl;
+  G4cout << "G4_He pressure: " << helium->GetPressure()/atmosphere << " atm" << G4endl;
+  G4cout << "G4_He density: "  << helium->GetDensity()/(g/cm3) << " g/cm3" << G4endl;
+  G4cout << "Gaseous Helium pressure: " << gHe->GetPressure()/atmosphere << " atm" << G4endl;
+  G4cout << "Gaseous Helium density: "  << gHe->GetDensity()/(g/cm3) << " g/cm3" << G4endl;
+//   G4Material* ssteel  = G4Material::GetMaterial("G4_STAINLESS-STEEL");
+  G4Material* copper  = G4Material::GetMaterial("G4_Cu");
+
+  // Sizes of the principal geometrical components (solids)
+
+  // Sizes included in the file TEDefinitions.hh
+
+  // Visualization attributes
+
+  G4VisAttributes* worldVisAtt  = new G4VisAttributes( G4Colour(1.0,1.0,1.0,0.0 ) );
+  G4VisAttributes* boxVisAtt    = new G4VisAttributes( G4Colour(1.0,1.0,1.0,1.0 ) );
+  G4VisAttributes* VesselVisAtt = new G4VisAttributes( G4Colour(1.0,1.0,1.0,1.0 ) );
+  G4VisAttributes* InitVisAtt   = new G4VisAttributes( G4Colour(1.0,0.0,0.0,0.25) );
+  G4VisAttributes* LargeVisAtt  = new G4VisAttributes( G4Colour(0.0,1.0,0.0,0.25) );
+  G4VisAttributes* SmallVisAtt  = new G4VisAttributes( G4Colour(0.0,0.0,1.0,0.25) );
+  G4VisAttributes* MCPVisAtt    = new G4VisAttributes( G4Colour(1.0,1.0,0.0,1.0) );
+
+
+  // Definitions of Solids, Logical Volumes, Physical Volumes
+  // World
+  G4ThreeVector positionWorld = G4ThreeVector(0,0,0);   // with this vector, ther source will be in (0,0,0)
+
+  G4GeometryManager::GetInstance()->SetWorldMaximumExtent(worldLength);
+
+  G4cout << "Computed tolerance = " << G4GeometryTolerance::GetInstance()->GetSurfaceTolerance()/mm << " mm" << G4endl;
+
+  G4Box* worldS = new G4Box("world",                                                       //its name
+                            (worldWidth/2.)*mm, (worldWidth/2.)*mm, (worldLength/2.*mm));   //its size
+
+  G4LogicalVolume* worldLV = new G4LogicalVolume(worldS,    //its solid
+                                                 vacuum,    //its material
+                                                 "World");  //its name
+
+  //  Must place the World Physical volume unrotated at (0,0,0).
+  G4VPhysicalVolume* worldPV = new G4PVPlacement(0,               // no rotation
+                                                 positionWorld,   // at (0,0,0)
+                                                 worldLV,         // its logical volume
+                                                 "World",         // its name
+                                                 0,               // its mother  volume
+                                                 false,           // no boolean operations
+                                                 0,               // copy number
+                                                 fCheckOverlaps); // checking overlaps
+
+  // Vessel
+  // Outside
+//   G4ThreeVector positionVesselOut = G4ThreeVector(0,0,0);
+//   G4ThreeVector positionVesselOut = G4ThreeVector(0,0,(vesselLength/2. + vesselThick)*mm);   // with this vector, ther source will be in (0,0,0)
+  G4ThreeVector positionVesselOut = G4ThreeVector(0,0,vesselZoffset);   // with this vector, ther source will be in (0,0,0)
+
+  G4Tubs* vesselOutS = new G4Tubs("vesselOut",        // name
+                               0.*mm,                 // inner radius
+                               vesselRadius*mm,       // outer radius
+                               (vesselLength/2. + vesselThick)*mm,  // length of outer vessel
+                               0.*deg,                // init phi
+                               360.*deg);             // end phi
+
+  G4LogicalVolume *vesselOutLV = new G4LogicalVolume(vesselOutS,    // its solid
+                                                  fVesselMaterial,  // its material
+                                                  "VesselOut",      // its name
+                                                  0,                // its FieldManager (will have to change)
+                                                  0,                // its sensitive detector
+                                                  0);               // its user cuts
+
+  new G4PVPlacement(0,                  // no rotation
+                    positionVesselOut,  // at (0,0,0)
+                    vesselOutLV,        // its logical volume
+                    "VesselOut",        // its name
+                    worldLV,            // its mother  volume
+                    false,              // no boolean operations
+                    0,                  // copy number
+                    fCheckOverlaps);    // checking overlaps
+
+  // Inside
+  G4ThreeVector positionVesselIn = G4ThreeVector(0,0,0);
+
+  G4Tubs* vesselInS = new G4Tubs("vesselIn",                              // name
+                                 0.*mm,                                   // inner radius
+                                 (vesselRadius-vesselThick)*mm,           // outer radius
+                                 (vesselLength/2)*mm,    // length of inner vessel
+                                 0.*deg,                                  // init phi
+                                 360.*deg);                               // end phi
+
+  G4LogicalVolume *vesselInLV = new G4LogicalVolume(vesselInS,    // its solid
+//                                                     gHe,          // its material
+                                                    vacuum,       // its material
+                                                    "VesselIn",   // its name
+                                                    0,            // its FieldManager (will have to change)
+                                                    0,            // its sensitive detector
+                                                    0);           // its user cuts
+
+  new G4PVPlacement(0,                  // no rotation
+                    positionVesselIn,   // at (0,0,0)
+                    vesselInLV,         // its logical volume
+                    "VesselIn",         // its name
+                    vesselOutLV,        // its mother  volume
+                    false,              // no boolean operations
+                    0,                  // copy number
+                    fCheckOverlaps);    // checking overlaps
+
+
+  // E26 - Long electrode
+  G4double E26Zpos = -177. + eThick/2.;
+  G4ThreeVector  posE26    = G4ThreeVector(0,0,E26Zpos);
+  G4Tubs          *E26S    = new G4Tubs("E26S", eRiinit*mm, eRolarge*mm, (eThick/2)*mm, 0.*deg, 360.*deg);
+  G4LogicalVolume *E26LV   = new G4LogicalVolume(E26S, copper, "E26", 0, 0, 0);
+  new G4PVPlacement(0, posE26, E26LV, "E26", vesselInLV, false, 0, fCheckOverlaps);
+  E26LV->SetVisAttributes(LargeVisAtt);
+
+  ////////////////////////////////
+  // ELECTRODES - SOURCE REGION //
+  ////////////////////////////////
+
+  // E27 - E31 (Lens left)
+  G4double E27_E31_Spacing = 12.;
+  for(G4int copyNo=0; copyNo<nE27_E31_Elecs; ++copyNo) {
+    G4double E27_E31_Zpos = -165 + copyNo*E27_E31_Spacing + eThick/2.;
+    G4Tubs* E27_E31S = new G4Tubs("E27_E31S", eRiinit*mm, eRoinit*mm, (eThick/2)*mm, 0.*deg, 360.*deg);
+
+    fLVE27_E31_Elecs[copyNo] = new G4LogicalVolume(E27_E31S,copper,"E27_E31LV",0,0,0);
+    fLVE27_E31_Elecs[copyNo]->SetVisAttributes(InitVisAtt);
+    new G4PVPlacement(0, G4ThreeVector(0,0,E27_E31_Zpos), fLVE27_E31_Elecs[copyNo], "E27-E31", vesselInLV, false, copyNo, fCheckOverlaps);
+  }
+
+  // E32 (Lens right) - E34
+  G4double E32_E34_Spacing = 13.;
+  for(G4int copyNo=0; copyNo<nE32_E34_Elecs; ++copyNo) {
+    G4double E32_E34_Zpos = -114 + copyNo*E32_E34_Spacing + eThick/2.;
+    G4Tubs* E32_E34S = new G4Tubs("E32_E34S", eRiinit*mm, eRoinit*mm, (eThick/2)*mm, 0.*deg, 360.*deg);
+
+    fLVE32_E34_Elecs[copyNo] = new G4LogicalVolume(E32_E34S,copper,"E32_E34LV",0,0,0);
+    fLVE32_E34_Elecs[copyNo]->SetVisAttributes(InitVisAtt);
+    new G4PVPlacement(0, G4ThreeVector(0,0,E32_E34_Zpos), fLVE32_E34_Elecs[copyNo], "E32-E34", vesselInLV, false, copyNo, fCheckOverlaps);
+  }
+
+  // E35 - Compensation Coil holder
+//   G4double E35Zpos = 47. + eThick/2.;
+  G4double E35Zpos = 0. + eThick/2.;
+  G4ThreeVector  posE35    = G4ThreeVector(0,0,E35Zpos);
+  G4double E35Rs[] = { 66, 100.6,  99, 120, 120, 101, 104.2, 120, 120, 103, 101,  66,  66};
+  G4double E35Zs[] = {-74,   -74, -69, -69, -70, -70,   -78, -78, -79, -79, -75, -75, -74};
+//   G4double E35Zs[] = {-45,   -45, -40, -40, -41, -41,   -49, -49, -50, -50, -46, -46, -45};
+  G4int E35nRZ = sizeof(E35Rs)/sizeof(G4double);
+  G4GenericPolycone *E35S = new G4GenericPolycone("E35S", 0.*deg, 360.*deg, E35nRZ, E35Rs, E35Zs);
+  G4LogicalVolume *E35LV   = new G4LogicalVolume(E35S, copper, "E35", 0, 0, 0);
+  new G4PVPlacement(0, posE35, E35LV, "E35", vesselInLV, false, 0, fCheckOverlaps);
+  E35LV->SetVisAttributes(InitVisAtt);
+
+  // E36
+  G4double E36Zpos = -61. + eThick/2.;
+  G4ThreeVector  posE36    = G4ThreeVector(0,0,E36Zpos);
+  G4Tubs          *E36S    = new G4Tubs("E36S", eRiinit*mm, eRoinit*mm, (eThick/2)*mm, 0.*deg, 360.*deg);
+  G4LogicalVolume *E36LV   = new G4LogicalVolume(E36S, copper, "E36", 0, 0, 0);
+  new G4PVPlacement(0, posE36, E36LV, "E36", vesselInLV, false, 0, fCheckOverlaps);
+  E36LV->SetVisAttributes(InitVisAtt);
+
+  // E37 - Main Coil holder (right)
+//   G4double E37Zpos = 39. + eThick/2.;
+  G4double E37Zpos = 0. + eThick/2.;
+  G4ThreeVector  posE37    = G4ThreeVector(0,0,E37Zpos);
+  G4double E37Rs[] = { 66,  68,  68, 120, 120,  69,  69,  68,  68,  66,  66};
+  G4double E37Zs[] = {-48, -48, -52, -52, -51, -51, -44, -44, -47, -47, -47};
+//   G4double E37Zs[] = { 0,  0,  5,  5,  4,  4, -4, -4, -1, -1,  0};
+  G4int E37nRZ = sizeof(E37Rs)/sizeof(G4double);
+  G4GenericPolycone *E37S = new G4GenericPolycone("E37S", 0.*deg, 360.*deg, E37nRZ, E37Rs, E37Zs);
+  G4LogicalVolume *E37LV   = new G4LogicalVolume(E37S, copper, "E37", 0, 0, 0);
+  new G4PVPlacement(0, posE37, E37LV, "E37", vesselInLV, false, 0, fCheckOverlaps);
+  E37LV->SetVisAttributes(InitVisAtt);
+
+  // E38 - Main Coil holder (right)
+//   G4double E38Zpos = 47. + eThick/2.;
+  G4double E38Zpos = 0. + eThick/2.;
+  G4ThreeVector  posE38    = G4ThreeVector(0,0,E38Zpos);
+  G4double E38Rs[] = { 66,  68,  68,  69,  69,  91,  91,  68,  68,  66,  66};
+  G4double E38Zs[] = {-40, -40, -43, -43, -35, -35, -34, -34, -39, -39, -39};
+//   G4double E38Zs[] = { 0,  0,  3,  3, -4,  -4,  -5, -5, -1, -1,  0};
+  G4int E38nRZ = sizeof(E38Rs)/sizeof(G4double);
+  G4GenericPolycone *E38S = new G4GenericPolycone("E38S", 0.*deg, 360.*deg, E38nRZ, E38Rs, E38Zs);
+  G4LogicalVolume *E38LV   = new G4LogicalVolume(E38S, copper, "E38", 0, 0, 0);
+  new G4PVPlacement(0, posE38, E38LV, "E38", vesselInLV, false, 0, fCheckOverlaps);
+  E38LV->SetVisAttributes(InitVisAtt);
+
+  // E39
+  G4double E39Zpos = -32. + eThick/2.;
+  G4ThreeVector  posE39    = G4ThreeVector(0,0,E39Zpos);
+  G4Tubs          *E39S    = new G4Tubs("E39S", eRiinit*mm, 91*mm, (eThick/2)*mm, 0.*deg, 360.*deg);
+  G4LogicalVolume *E39LV   = new G4LogicalVolume(E39S, copper, "E39", 0, 0, 0);
+  new G4PVPlacement(0, posE39, E39LV, "E39", vesselInLV, false, 0, fCheckOverlaps);
+  E39LV->SetVisAttributes(InitVisAtt);
+
+
+
+
+//   // Source (TEMPORARY!!!)
+//
+//   G4ThreeVector positionSource = G4ThreeVector(0,0,0);
+//
+//
+//   G4Sphere* sourceS = new G4Sphere("source",          // name
+//                                    0.*mm,             // inner radius
+//                                    1*mm,   // outer radius
+//                                    0.*deg,            // init phi
+//                                    360.*deg,          // end phi
+//                                    0.*deg,            // init theta
+//                                    180.*deg);         // end theta
+//
+//   G4LogicalVolume *fLogicSource = new G4LogicalVolume(sourceS,
+//                                                       vacuum,
+//                                                       "Source",
+//                                                       0,0,0);
+//
+//   new G4PVPlacement(0,               // no rotation
+//                     positionSource,  // at (x,y,z)
+//                     fLogicSource,    // its logical volume
+//                     "Source",      // its name
+//                     vesselInLV,      // its mother volume
+//                     false,           // no boolean operations
+//                     0,               // copy number
+//                     fCheckOverlaps); // checking overlaps
+//
+//   G4cout << "Target is " << 2*targetLength/cm << " cm of "
+//          << fTargetMaterial->GetName() << G4endl;
+
+  
+  
+  ELECTRODES ARE 0.6mm FOR LARGE ELECTRODES 0.3mm FOR THE SMALL
+  
+  COIL HOLDER IS DIFFERENT:
+  BTW E57 AND 59 THERE ARE 29mm OF DISTANCE
+  BETWEEN THERE'S THE COIL HOLDER
+  HALFWAY BETWEEN 57 AND 58 THERE'S ANOTHER ELECTRODE (THK = 0.3mm); DISTANCE BETWEEN THE TWO FACES OF THE COIL HOLDER IS 3mm AND THIS ELECTRODE IS ALSO RIGHT HALFWAY THROUGH
+  THE COIL HOLDER ELECTRODE THICKNESS IS 2mm; THE SMALL CYLINDER THICKNESS IS 1mm, AND ITS HEIGHT IS 12mm
+  THE ELECTRODE ITSELF OF THE COIL HOLDER IS MERGED TO THE CYLINDER, MEANING THAT IT'S LONG 10mm + 2mm = 12mm
+  OUTER RADIUS IS 91mm; IR IS 68mm
+  
+  THE GAP BETWEEN E57 AND THE CYLINDER IS 1mm (BUT RECALCULATE IT!!!)
+  
+  
+  
+  
+  // E40
+  G4double E40Zpos = 30. + eThick/2.;
+  G4ThreeVector  posE40    = G4ThreeVector(0,0,E40Zpos);
+  G4Tubs          *E40S    = new G4Tubs("E40S", eRiinit*mm, 91*mm, (eThick/2)*mm, 0.*deg, 360.*deg);
+  G4LogicalVolume *E40LV   = new G4LogicalVolume(E40S, copper, "E40", 0, 0, 0);
+  new G4PVPlacement(0, posE40, E40LV, "E40", vesselInLV, false, 0, fCheckOverlaps);
+  E40LV->SetVisAttributes(InitVisAtt);
+
+
+  // E41 - Main Coil holder (left)
+//   G4double E41Zpos = 39. + eThick/2.;
+  G4double E41Zpos = 0. + eThick/2.;
+  G4ThreeVector  posE41    = G4ThreeVector(0,0,E41Zpos);
+  G4double E41Rs[] = {66, 68, 68, 91, 91, 69, 69, 68, 68, 66, 66};
+//   G4double E41Zs[] = { 0,  0,  5,  5,  4,  4, -4, -4, -1, -1,  0};
+  G4double E41Zs[] = {39, 39, 34, 34, 35, 35, 43, 43, 40, 40, 39};
+  G4int E41nRZ = sizeof(E41Rs)/sizeof(G4double);
+  G4GenericPolycone *E41S = new G4GenericPolycone("E41S", 0.*deg, 360.*deg, E41nRZ, E41Rs, E41Zs);
+  G4LogicalVolume *E41LV   = new G4LogicalVolume(E41S, copper, "E41", 0, 0, 0);
+  new G4PVPlacement(0, posE41, E41LV, "E41", vesselInLV, false, 0, fCheckOverlaps);
+  E41LV->SetVisAttributes(InitVisAtt);
+
+  // E42 - Main Coil holder (right)
+//   G4double E42Zpos = 47. + eThick/2.;
+  G4double E42Zpos = 0. + eThick/2.;
+  G4ThreeVector  posE42    = G4ThreeVector(0,0,E42Zpos);
+  G4double E42Rs[] = {66, 68, 68, 69, 69, 120, 120, 68, 68, 66, 66};
+//   G4double E42Zs[] = { 0,  0,  3,  3, -4,  -4,  -5, -5, -1, -1,  0};
+  G4double E42Zs[] = {47, 47, 44, 44, 51,  51,  52, 52, 48, 48, 47};
+  G4int E42nRZ = sizeof(E42Rs)/sizeof(G4double);
+  G4GenericPolycone *E42S = new G4GenericPolycone("E42S", 0.*deg, 360.*deg, E42nRZ, E42Rs, E42Zs);
+  G4LogicalVolume *E42LV   = new G4LogicalVolume(E42S, copper, "E42", 0, 0, 0);
+  new G4PVPlacement(0, posE42, E42LV, "E42", vesselInLV, false, 0, fCheckOverlaps);
+  E42LV->SetVisAttributes(InitVisAtt);
+
+
+  // E43
+  G4double E43Zpos = 60. + eThick/2.;
+  G4ThreeVector    posE43  = G4ThreeVector(0,0,E43Zpos);
+  G4Tubs          *E43S    = new G4Tubs("E43S", eRiinit*mm, eRoinit*mm, (eThick/2)*mm, 0.*deg, 360.*deg);
+  G4LogicalVolume *E43LV   = new G4LogicalVolume(E43S, copper, "E43", 0, 0, 0);
+  new G4PVPlacement(0, posE43, E43LV, "E43", vesselInLV, false, 0, fCheckOverlaps);
+  E43LV->SetVisAttributes(InitVisAtt);
+
+
+  // E44 - Compensation Coil holder
+//   G4double E44Zpos = 47. + eThick/2.;
+  G4double E44Zpos = 0. + eThick/2.;
+  G4ThreeVector  posE44    = G4ThreeVector(0,0,E44Zpos);
+  G4double E44Rs[] = {66, 101, 103, 120, 120, 104.2, 101, 120, 120, 99, 100.6, 66, 66};
+  G4double E44Zs[] = {73,  73,  68,  68,  69,    69,  77,  77,  78, 78,    74, 74, 73};
+  G4int E44nRZ = sizeof(E44Rs)/sizeof(G4double);
+  G4GenericPolycone *E44S = new G4GenericPolycone("E44S", 0.*deg, 360.*deg, E44nRZ, E44Rs, E44Zs);
+  G4LogicalVolume *E44LV   = new G4LogicalVolume(E44S, copper, "E44", 0, 0, 0);
+  new G4PVPlacement(0, posE44, E44LV, "E44", vesselInLV, false, 0, fCheckOverlaps);
+  E44LV->SetVisAttributes(InitVisAtt);
+
+  // E45 - E49
+  G4double E45_E49_Spacing = 20.;
+  for(G4int copyNo=0; copyNo<nE45_E49_Elecs; ++copyNo) {
+    G4double E45_E49_Zpos = 85 + copyNo*E45_E49_Spacing + eThick/2.;
+    G4Tubs* E45_E49S = new G4Tubs("E45_E49S", eRiinit*mm, eRoinit*mm, (eThick/2)*mm, 0.*deg, 360.*deg);
+
+    fLVE45_E49_Elecs[copyNo] = new G4LogicalVolume(E45_E49S,copper,"E45_E49LV",0,0,0);
+    fLVE45_E49_Elecs[copyNo]->SetVisAttributes(InitVisAtt);
+    new G4PVPlacement(0, G4ThreeVector(0,0,E45_E49_Zpos), fLVE45_E49_Elecs[copyNo], "E45-E49", vesselInLV, false, copyNo, fCheckOverlaps);
+  }
+
+  //////////////////////////////////
+  // ELECTRODES - ELECTRON REGION //
+  //////////////////////////////////
+
+  // E50 - Long electrode
+  G4double E50Zpos = 177. + eThick/2.;
+  G4ThreeVector    posE50  = G4ThreeVector(0,0,E50Zpos);
+  G4Tubs          *E50S    = new G4Tubs("E50S", eRiinit*mm, eRolarge*mm, (eThick/2)*mm, 0.*deg, 360.*deg);
+  G4LogicalVolume *E50LV   = new G4LogicalVolume(E50S, copper, "E50", 0, 0, 0);
+  new G4PVPlacement(0, posE50, E50LV, "E50", vesselInLV, false, 0, fCheckOverlaps);
+  E50LV->SetVisAttributes(LargeVisAtt);
+
+  // E51 - E67
+  G4double E51_E67_Spacing = 30.;
+  for(G4int copyNo=0; copyNo<nE51_E67_Elecs; ++copyNo) {
+    G4double E51_E67_Zpos = 207 + copyNo*E51_E67_Spacing + eThick/2.;
+    G4Tubs* E51_E67S = new G4Tubs("E51_E67S", eRilarge*mm, eRolarge*mm, (eThick/2)*mm, 0.*deg, 360.*deg);
+
+    fLVE51_E67_Elecs[copyNo] = new G4LogicalVolume(E51_E67S,copper,"E51_E67LV",0,0,0);
+    fLVE51_E67_Elecs[copyNo]->SetVisAttributes(LargeVisAtt);
+    new G4PVPlacement(0, G4ThreeVector(0,0,E51_E67_Zpos), fLVE51_E67_Elecs[copyNo], "E51-E67", vesselInLV, false, copyNo, fCheckOverlaps);
+  }
+
+  // E68 - E87
+  G4double E68_E87_Spacing = 15.;
+  for(G4int copyNo=0; copyNo<nE68_E87_Elecs; ++copyNo) {
+    G4double E68_E87_Zpos = 702 + copyNo*E68_E87_Spacing + eThick/2.;
+    G4Tubs* E68_E87S = new G4Tubs("E68_E87S", eRismall*mm, eRosmall*mm, (eThick/2)*mm, 0.*deg, 360.*deg);
+
+    fLVE68_E87_Elecs[copyNo] = new G4LogicalVolume(E68_E87S,copper,"E68_E87LV",0,0,0);
+    fLVE68_E87_Elecs[copyNo]->SetVisAttributes(SmallVisAtt);
+    new G4PVPlacement(0, G4ThreeVector(0,0,E68_E87_Zpos), fLVE68_E87_Elecs[copyNo], "E68-E87", vesselInLV, false, copyNo, fCheckOverlaps);
+  }
+
+  // MCP box
+  // Front
+  G4double BoxFrontZpos = 987. + eThick/2.;
+  G4ThreeVector  posBoxFront    = G4ThreeVector(0,0,BoxFrontZpos);
+  G4Tubs          *BoxFrontS    = new G4Tubs("BoxFrontS", targetRadius*mm, 150.*mm, (eThick/2)*mm, 0.*deg, 360.*deg);
+  G4LogicalVolume *BoxFrontLV   = new G4LogicalVolume(BoxFrontS, copper, "BoxFront", 0, 0, 0);
+  new G4PVPlacement(0, posBoxFront, BoxFrontLV, "BoxFront", vesselInLV, false, 0, fCheckOverlaps);
+  BoxFrontLV->SetVisAttributes(boxVisAtt);
+
+  // Body
+  G4double BoxBodyLength = 124.;
+  G4double BoxBodyZpos = 988. + BoxBodyLength/2.;
+  G4ThreeVector  posBoxBody    = G4ThreeVector(0,0,BoxBodyZpos);
+  G4Tubs          *BoxBodyS    = new G4Tubs("BoxBodyS", 149*mm, 150.*mm, (BoxBodyLength/2)*mm, 0.*deg, 360.*deg);
+  G4LogicalVolume *BoxBodyLV   = new G4LogicalVolume(BoxBodyS, copper, "BoxBody", 0, 0, 0);
+  new G4PVPlacement(0, posBoxBody, BoxBodyLV, "BoxBody", vesselInLV, false, 0, fCheckOverlaps);
+  BoxBodyLV->SetVisAttributes(boxVisAtt);
+
+  // Back
+  G4double BoxBackZpos = 1112. + eThick/2.;
+  G4ThreeVector  posBoxBack    = G4ThreeVector(0,0,BoxBackZpos);
+  G4Tubs          *BoxBackS    = new G4Tubs("BoxBackS", 0.*mm, 150.*mm, (eThick/2)*mm, 0.*deg, 360.*deg);
+  G4LogicalVolume *BoxBackLV   = new G4LogicalVolume(BoxBackS, copper, "BoxBack", 0, 0, 0);
+  new G4PVPlacement(0, posBoxBack, BoxBackLV, "BoxBack", vesselInLV, false, 0, fCheckOverlaps);
+  BoxBackLV->SetVisAttributes(boxVisAtt);
+
+  // Target
+
+  G4ThreeVector positionTarget = G4ThreeVector(0,0,targetZ*mm);
+//   G4ThreeVector positionTarget = G4ThreeVector(0,0,0.);
+
+
+  G4Tubs* targetS = new G4Tubs("target",          // name
+                               0.*mm,             // inner radius
+                               targetRadius*mm,   // outer radius
+                               targetLength*mm,   // length of target
+                               0.*deg,            // init phi
+                               360.*deg);         // end phi
+
+  fLogicTarget    = new G4LogicalVolume(targetS,
+//                                         vacuum,
+                                        fTargetMaterial,
+                                        "Target",
+                                        0,0,0);
+
+  new G4PVPlacement(0,               // no rotation
+                    positionTarget,  // at (x,y,z)
+                    fLogicTarget,    // its logical volume
+                    "Target",      // its name
+                    vesselInLV,      // its mother volume
+                    false,           // no boolean operations
+                    0,               // copy number
+                    fCheckOverlaps); // checking overlaps
+
+
+
+
+
+
+
+
+
+
+
+
+//
+  // TEST User limits
+  G4double maxStep = 100*mm;
+//   G4double maxStep = 10*MeV;
+//   G4double maxStep = 0.1* vesselLength;
+  fStepLimit = new G4UserLimits(maxStep);
+//   fStepLimit = new G4UserLimits();
+//   fStepLimit->SetUserMinEkine(maxStep);
+//   vesselInLV->SetUserLimits(fStepLimit);
+//   vesselOutLV->SetUserLimits(fStepLimit);
+//   fLogicTarget->SetUserLimits(fStepLimit);
+
+
+
+  worldLV      ->SetVisAttributes(worldVisAtt);
+  vesselOutLV  ->SetVisAttributes(VesselVisAtt);
+  vesselInLV   ->SetVisAttributes(VesselVisAtt);
+//   fLogicSource ->SetVisAttributes(boxVisAtt);
+  fLogicTarget ->SetVisAttributes(MCPVisAtt);
+
+  return worldPV;
+}
+
+//....oooOO0OOooo........oooOO0OOooo........oooOO0OOooo........oooOO0OOooo......
+
+void TEDetectorConstruction::ConstructSDandField()
+{
+  // Sensitive detectors
+
+  TETrackerSD* aTrackerSD = new TETrackerSD("TargetSD", "TrackerHitsCollection");
+  G4SDManager::GetSDMpointer()->AddNewDetector(aTrackerSD);
+  SetSensitiveDetector("VesselIn", aTrackerSD, true);
+  SetSensitiveDetector("VesselOut", aTrackerSD, true);
+  SetSensitiveDetector("World", aTrackerSD, true);
+//   SetSensitiveDetector("Target", aTrackerSD, true);
+
+#ifdef MAGSTANDARD
+  // Create global magnetic field messenger.
+  // Uniform magnetic field is then created automatically if
+  // the field value is not zero.
+  G4ThreeVector fieldValue = G4ThreeVector();
+  fMagFieldMessenger = new G4GlobalMagFieldMessenger(fieldValue);
+  fMagFieldMessenger->SetVerboseLevel(1);
+
+  // Register the field messenger for deleting
+  G4AutoDelete::Register(fMagFieldMessenger);
+#else
+  // STUFF FROM PURGING_MAGNET
+  //Field grid in A9.TABLE. File must be in accessible from run urn directory.
+
+
+  TEMagTabulatedField3D* TEMagField= new TEMagTabulatedField3D("/home/garnet/PhD/20150827_Neutrino_mass/shortelectron/electron_analysis/transverse_field/field_map_creation/EMfieldMap_Src-360_Radius155mm_Real0.400Vmm_8G.root", zOffset);
+  fBField.Put(TEMagField);
+
+  G4EqMagElectricField* equation = new G4EqMagElectricField(TEMagField);
+
+  //This is thread-local
+  G4FieldManager* pFieldMgr = G4TransportationManager::GetTransportationManager()->GetFieldManager();
+  G4cout<< "DeltaStep "<< pFieldMgr->GetDeltaOneStep()/mm <<"mm" <<G4endl;
+
+//   G4MagIntegratorStepper* stepper = new G4SimpleRunge (equation,12);
+//   G4MagIntegratorStepper* stepper = new G4SimpleHeum (equation,12);
+  G4MagIntegratorStepper* stepper = new G4ClassicalRK4 (equation,12);
+  G4double minStep           = 1e-7*mm;
+  G4ChordFinder* chordFinder = new G4ChordFinder((G4MagneticField*)TEMagField,minStep,stepper);
+
+  G4TransportationManager* transportManager = G4TransportationManager::GetTransportationManager();
+
+//   G4PropagatorInField* fieldPropagator = transportManager->GetPropagatorInField();
+//
+//   G4double epsMin            = 2.5e-7*mm;
+//   G4double epsMax            = 2.5e-6*mm;
+//
+//   fieldPropagator->SetMinimumEpsilonStep(epsMin);
+//   fieldPropagator->SetMaximumEpsilonStep(epsMax);
+//
+  pFieldMgr->SetChordFinder(chordFinder);
+
+//   G4double chordPrecision = 1e-5*mm;
+//   pFieldMgr->GetChordFinder()->SetDeltaChord( chordPrecision );
+  pFieldMgr->SetDetectorField(fBField.Get());
+#endif
+}
+
+//....oooOO0OOooo........oooOO0OOooo........oooOO0OOooo........oooOO0OOooo......
+
+void TEDetectorConstruction::SetTargetMaterial(G4String materialName)
+{
+  G4NistManager* nistManager = G4NistManager::Instance();
+
+  G4Material* pttoMaterial =
+              nistManager->FindOrBuildMaterial(materialName);
+
+//   if (fTargetMaterial != pttoMaterial) {
+//      if ( pttoMaterial ) {
+//         fTargetMaterial = pttoMaterial;
+//         if (fLogicTarget) fLogicTarget->SetMaterial(fTargetMaterial);
+//         G4cout
+//           << G4endl
+//           << "----> The target is made of " << materialName << G4endl;
+//      } else {
+//         G4cout
+//           << G4endl
+//           << "-->  WARNING from SetTargetMaterial : "
+//           << materialName << " not found" << G4endl;
+//      }
+//   }
+}
+
+//....oooOO0OOooo........oooOO0OOooo........oooOO0OOooo........oooOO0OOooo......
+
+void TEDetectorConstruction::SetMaxStep(G4double maxStep)
+{
+  if ((fStepLimit)&&(maxStep>0.)) fStepLimit->SetMaxAllowedStep(maxStep);
+}
+
+//....oooOO0OOooo........oooOO0OOooo........oooOO0OOooo........oooOO0OOooo......
+
+void TEDetectorConstruction::SetCheckOverlaps(G4bool checkOverlaps)
+{
+  fCheckOverlaps = checkOverlaps;
+}
